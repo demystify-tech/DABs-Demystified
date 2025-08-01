@@ -1,0 +1,142 @@
+name: DAB Validation and Deployment
+
+on:
+  push:
+    branches: [ dev ]
+  pull_request:
+    branches: [ dev ]
+
+env:
+  PYTHON_VERSION: '3.9'
+
+jobs:
+  validate-and-deploy:
+    name: Validate DAB Configuration and Deploy
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        
+    - name: Cache Python Dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+          
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install databricks-cli pyyaml
+        if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+        
+    - name: Configure Databricks CLI
+      run: |
+        echo "[DEFAULT]" > ~/.databrickscfg
+        echo "host = ${{ secrets.DATABRICKS_HOST }}" >> ~/.databrickscfg
+        echo "token = ${{ secrets.DATABRICKS_TOKEN }}" >> ~/.databrickscfg
+        chmod 600 ~/.databrickscfg
+        
+    - name: Verify Databricks Connection
+      run: |
+        databricks workspace list --output-format json > /dev/null
+        echo "✓ Databricks connection verified"
+        
+    - name: Run Databricks Bundle Validate
+      id: dab-validate
+      run: |
+        echo "==================== DATABRICKS BUNDLE VALIDATION ===================="
+        if databricks bundle validate --target dev; then
+          echo "✓ Databricks bundle validation passed"
+          echo "dab_validation=success" >> $GITHUB_OUTPUT
+        else
+          echo "✗ Databricks bundle validation failed"
+          echo "dab_validation=failed" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+        
+    - name: Run Enterprise Policy Validation
+      id: enterprise-validate
+      run: |
+        echo "================== ENTERPRISE POLICY VALIDATION =================="
+        if python validation/enterprise_dab_validator.py --path . --strict; then
+          echo "✓ Enterprise policy validation passed"
+          echo "enterprise_validation=success" >> $GITHUB_OUTPUT
+        else
+          echo "✗ Enterprise policy validation failed"
+          echo "enterprise_validation=failed" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+        
+    - name: Upload Validation Report
+      uses: actions/upload-artifact@v3
+      if: always()  # Upload report even if validation fails
+      with:
+        name: validation-report
+        path: validation/validation_report_*.txt
+        retention-days: 30
+        
+    - name: Deploy to Development Environment
+      if: steps.dab-validate.outputs.dab_validation == 'success' && steps.enterprise-validate.outputs.enterprise_validation == 'success'
+      run: |
+        echo "================= DEPLOYING TO DEVELOPMENT ENVIRONMENT ================="
+        databricks bundle deploy --target dev
+        echo "✓ Successfully deployed to development environment"
+        
+    - name: Deployment Summary
+      if: always()
+      run: |
+        echo "========================= DEPLOYMENT SUMMARY ========================="
+        echo "Branch: ${{ github.ref_name }}"
+        echo "Commit: ${{ github.sha }}"
+        echo "DAB Validation: ${{ steps.dab-validate.outputs.dab_validation || 'not-run' }}"
+        echo "Enterprise Validation: ${{ steps.enterprise-validate.outputs.enterprise_validation || 'not-run' }}"
+        
+        if [[ "${{ steps.dab-validate.outputs.dab_validation }}" == "success" && "${{ steps.enterprise-validate.outputs.enterprise_validation }}" == "success" ]]; then
+          echo "Deployment Status: SUCCESS"
+        else
+          echo "Deployment Status: BLOCKED (validation failures)"
+        fi
+        echo "================================================================="
+        
+    - name: Comment on PR
+      if: github.event_name == 'pull_request' && always()
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const dabValidation = '${{ steps.dab-validate.outputs.dab_validation }}';
+          const enterpriseValidation = '${{ steps.enterprise-validate.outputs.enterprise_validation }}';
+          
+          let status = '🔴 Failed';
+          let message = 'Validation failed. Please check the logs and validation report.';
+          
+          if (dabValidation === 'success' && enterpriseValidation === 'success') {
+            status = '✅ Passed';
+            message = 'All validations passed successfully. Ready for deployment.';
+          }
+          
+          const comment = `## DAB Validation Results ${status}
+          
+          | Check | Status |
+          |-------|---------|
+          | Databricks Bundle Validate | ${dabValidation === 'success' ? '✅ Passed' : '❌ Failed'} |
+          | Enterprise Policy Validation | ${enterpriseValidation === 'success' ? '✅ Passed' : '❌ Failed'} |
+          
+          ${message}
+          
+          📄 [View validation report in artifacts](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})`;
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: comment
+          });

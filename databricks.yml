@@ -4,7 +4,41 @@ bundle:
   name: dabs_demystified
 
 include:
-  - resources/*.yml
+  - resources/dabs_demystified_job.yml
+  - resources/dabs_demystified_pipeline.yml
+
+variables:
+  project_name:
+    description: "Project name for resource tagging"
+    default: dabs_demystified
+  
+  owner_email:
+    description: "Owner email for resource tagging"
+    default: sourav.banerjee@databricks.com
+  
+  cost_center:
+    description: "Cost center for billing allocation"
+    default: engineering
+  
+  created_by:
+    description: "Method used to create resources"
+    default: databricks_asset_bundles
+  
+  spark_version:
+    description: "Spark version for job clusters"
+    default: 13.3.x-scala2.12
+  
+  node_type_id:
+    description: "Node type for job clusters"
+    default: Standard_D3_v2
+  
+  min_workers:
+    description: "Minimum number of workers for autoscaling"
+    default: 1
+  
+  max_workers:
+    description: "Maximum number of workers for autoscaling"
+    default: 3
 
 targets:
   # The 'dev' target, for development purposes. This target is the default.

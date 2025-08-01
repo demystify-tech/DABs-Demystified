@@ -1,0 +1,116 @@
+name: Production Deployment
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:  # Allow manual triggering
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'prod'
+        type: choice
+        options:
+        - prod
+        - staging
+
+env:
+  PYTHON_VERSION: '3.9'
+
+jobs:
+  validate-and-deploy-production:
+    name: Validate and Deploy to Production
+    runs-on: ubuntu-latest
+    environment: production  # Requires manual approval
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install databricks-cli pyyaml
+        if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+        
+    - name: Configure Databricks CLI
+      run: |
+        echo "[DEFAULT]" > ~/.databrickscfg
+        echo "host = ${{ secrets.DATABRICKS_HOST_PROD }}" >> ~/.databrickscfg
+        echo "token = ${{ secrets.DATABRICKS_TOKEN_PROD }}" >> ~/.databrickscfg
+        chmod 600 ~/.databrickscfg
+        
+    - name: Determine Target Environment
+      id: target-env
+      run: |
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          echo "target=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
+        else
+          echo "target=prod" >> $GITHUB_OUTPUT
+        fi
+        
+    - name: Run Databricks Bundle Validate
+      id: dab-validate
+      run: |
+        echo "============ DATABRICKS BUNDLE VALIDATION (Production) ============"
+        TARGET_ENV="${{ steps.target-env.outputs.target }}"
+        if databricks bundle validate --target $TARGET_ENV; then
+          echo "✓ Databricks bundle validation passed for $TARGET_ENV"
+          echo "dab_validation=success" >> $GITHUB_OUTPUT
+        else
+          echo "✗ Databricks bundle validation failed for $TARGET_ENV"
+          echo "dab_validation=failed" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+        
+    - name: Run Enterprise Policy Validation (Strict Mode)
+      id: enterprise-validate
+      run: |
+        echo "========== ENTERPRISE POLICY VALIDATION (Strict Mode) =========="
+        if python validation/enterprise_dab_validator.py --path . --strict; then
+          echo "✓ Enterprise policy validation passed"
+          echo "enterprise_validation=success" >> $GITHUB_OUTPUT
+        else
+          echo "✗ Enterprise policy validation failed"
+          echo "enterprise_validation=failed" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+        
+    - name: Upload Production Validation Report
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: production-validation-report
+        path: validation/validation_report_*.txt
+        retention-days: 90  # Keep production reports longer
+        
+    - name: Deploy to Production Environment
+      if: steps.dab-validate.outputs.dab_validation == 'success' && steps.enterprise-validate.outputs.enterprise_validation == 'success'
+      run: |
+        echo "=============== DEPLOYING TO PRODUCTION ENVIRONMENT ==============="
+        TARGET_ENV="${{ steps.target-env.outputs.target }}"
+        databricks bundle deploy --target $TARGET_ENV
+        echo "✓ Successfully deployed to $TARGET_ENV environment"
+        
+    - name: Notify Teams on Success
+      if: success()
+      run: |
+        echo "🎉 Production deployment completed successfully!"
+        echo "Environment: ${{ steps.target-env.outputs.target }}"
+        echo "Commit: ${{ github.sha }}"
+        echo "Deployed by: ${{ github.actor }}"
+        
+    - name: Notify Teams on Failure
+      if: failure()
+      run: |
+        echo "🚨 Production deployment failed!"
+        echo "Please check the logs and validation reports."
+        echo "Environment: ${{ steps.target-env.outputs.target }}"
+        echo "Commit: ${{ github.sha }}"
+        echo "Failed step: Check the workflow logs for details"

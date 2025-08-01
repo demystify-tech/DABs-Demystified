@@ -41,8 +41,14 @@ resources:
       job_clusters:
         - job_cluster_key: job_cluster
           new_cluster:
-            spark_version: 13.3.x-scala2.12
-            node_type_id: Standard_D3_v2
+            spark_version: ${var.spark_version}
+            node_type_id: ${var.node_type_id}
             autoscale:
-                min_workers: 1
-                max_workers: 3
+                min_workers: ${var.min_workers}
+                max_workers: 4
+            custom_tags:
+              project: ${var.project_name}
+              environment: "{{ bundle.target }}"
+              owner: ${var.owner_email}
+              cost_center: ${var.cost_center}
+              created_by: ${var.created_by}
